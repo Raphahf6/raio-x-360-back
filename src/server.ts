@@ -147,3 +147,37 @@ const PORT = process.env.PORT || 3333;
 httpServer.listen(PORT, () => {
     console.log(`🚀 Raio-X 360 rodando na porta ${PORT}`);
 });
+
+// ===> ADICIONE ESTA FUNÇÃO NO FINAL DO ARQUIVO <===
+
+async function restoreSessions() {
+    try {
+        console.log("🔄 Buscando sessões para restaurar...");
+        // Busca todas as instâncias que deveriam estar conectadas
+        const result = await query('SELECT * FROM "Instance" WHERE status = $1', ['CONNECTED']);
+        
+        for (const row of result.rows) {
+            const instanceId = row.id;
+            console.log(`🔌 Restaurando instância: ${instanceId}`);
+            
+            // Recria a classe (Isso vai ler a pasta sessions do Disco Persistente)
+            const instance = new WhatsAppInstance(instanceId, io);
+            activeInstances.set(instanceId, instance);
+            
+            // Inicia sem forçar nova conexão (vai usar os arquivos salvos)
+            await instance.init();
+        }
+        console.log(`✅ ${result.rowCount} sessões restauradas com sucesso.`);
+    } catch (error) {
+        console.error("❌ Erro ao restaurar sessões:", error);
+    }
+}
+
+
+// Inicia o servidor e DEPOIS restaura as sessões
+httpServer.listen(PORT, async () => {
+    console.log(`🚀 Raio-X 360 rodando na porta ${PORT}`);
+    
+    // Chama a restauração automática
+    await restoreSessions();
+});
