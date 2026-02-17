@@ -86,45 +86,59 @@ app.get('/instance/:id/red-alert', async (req: Request, res: Response) => {
 app.get('/instance/:id/funnel', async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
-        // Simples contagem baseada em LIKE (Idealmente seria Full Text Search)
         const keywords = ['pix', 'cardapio', 'entreg', 'atras', 'valor'];
-        const results = [];
+        
+        // AQUI ESTAVA O ERRO: Precisamos dizer que é um array de qualquer coisa ou tipar o objeto
+        const results: { keyword: string; count: number }[] = []; 
 
         for (const word of keywords) {
             const count = await query(`
                 SELECT COUNT(*) as total FROM "AuditLog" 
                 WHERE "instanceId" = $1 AND content ILIKE $2 AND direction = 'IN'
             `, [id, `%${word}%`]);
-            results.push({ keyword: word, count: parseInt(count.rows[0].total) });
+            
+            // O Postgres retorna count como string, precisamos converter
+            results.push({ 
+                keyword: word, 
+                count: parseInt(count.rows[0]?.total || "0") 
+            });
         }
-        res.json(results);
+        return res.json(results);
     } catch (error) {
-        res.status(500).json({ error: "Erro no funil" });
+        console.error(error);
+        return res.status(500).json({ error: "Erro no funil" });
     }
 });
 
-// Rota 4: Criar Regra de Automação
+// Rota 4: Criar Regra de Automação (Garanta que está assim)
 app.post('/automation', async (req: Request, res: Response) => {
     try {
         const { instanceId, keyword, response } = req.body;
+        
+        if (!instanceId || !keyword || !response) {
+            return res.status(400).json({ error: "Dados incompletos" });
+        }
+
         const id = uuidv4();
         await query(
             `INSERT INTO "AutomationRule" (id, "instanceId", keyword, response) VALUES ($1, $2, $3, $4)`,
             [id, instanceId, keyword, response]
         );
-        res.json({ success: true, id });
+        return res.json({ success: true, id });
     } catch (error) {
-        res.status(500).json({ error: "Erro ao criar regra" });
+        console.error(error);
+        return res.status(500).json({ error: "Erro ao criar regra" });
     }
 });
 
-// Rota 5: Listar Regras
+// Rota 5: Listar Regras (Garanta que está assim)
 app.get('/instance/:id/automation', async (req: Request, res: Response) => {
     try {
         const result = await query(`SELECT * FROM "AutomationRule" WHERE "instanceId" = $1`, [req.params.id]);
-        res.json(result.rows);
+        return res.json(result.rows);
     } catch (error) {
-        res.status(500).json({ error: "Erro ao listar regras" });
+        console.error(error);
+        return res.status(500).json({ error: "Erro ao listar regras" });
     }
 });
 
