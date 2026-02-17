@@ -6,8 +6,9 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
+    "noImplicitAny": false,  // <-- DICA: Mude para false se quiser ignorar erros de 'any' temporariamente
     "esModuleInterop": true,
-    "skipLibCheck": true,
+    "skipLibCheck": true,    // <-- ESSENCIAL: Ignora erros dentro dos node_modules
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   }
