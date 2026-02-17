@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Company {
+  id        String     @id @default(uuid())
+  name      String
+  instances Instance[]
+}
+
+model Instance {
+  id        String     @id @default(uuid())
+  name      String
+  companyId String
+  company   Company    @relation(fields: [companyId], references: [id])
+  status    String     @default("DISCONNECTED")
+  logs      AuditLog[]
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  instanceId   String
+  instance     Instance @relation(fields: [instanceId], references: [id])
+  customerHash String   
+  direction    String   // "IN" (Cliente) ou "OUT" (Loja)
+  content      String?  
+  timestamp    DateTime @default(now())
+  responseTime Int?     // Segundos desde a última mensagem do cliente
+}
