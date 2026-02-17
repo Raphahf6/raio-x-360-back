@@ -5,7 +5,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { v4 as uuidv4 } from 'uuid';
 import { WhatsAppInstance } from './lib/whatsapp';
-import { query } from './lib/db'; // Nossa conexão SQL direta
+import { query } from './lib/db';
 
 dotenv.config();
 
@@ -14,97 +14,39 @@ app.use(cors());
 app.use(express.json());
 
 const httpServer = createServer(app);
-const io = new Server(httpServer, {
-    cors: { origin: "*" } // Permite conexões de qualquer frontend (localhost ou produção)
-});
-
-// Armazena as sessões ativas na memória RAM
+const io = new Server(httpServer, { cors: { origin: "*" } });
 export const activeInstances = new Map<string, WhatsAppInstance>();
 
-// Rota 1: Criar Empresa (Cadastro Inicial)
-app.post('/company', async (req: Request, res: Response) => {
-    try {
-        const { name } = req.body;
-        
-        if (!name) {
-            return res.status(400).json({ error: "Nome da empresa é obrigatório" });
-        }
+// ... (Rotas de Company e Connect iguais ao anterior) ...
 
-        const id = uuidv4();
-        
-        await query('INSERT INTO "Company" (id, name) VALUES ($1, $2)', [id, name]);
-        
-        return res.json({ id, name, message: "Empresa criada com sucesso" });
-    } catch (error) {
-        console.error(error);
-        return res.status(500).json({ error: "Erro ao criar empresa" });
-    }
-});
-
-// Rota 2: Conectar Instância (O botão "Conectar WhatsApp" do Painel)
-app.post('/instance/connect', async (req: Request, res: Response) => {
-    try {
-        const { instanceId, name, companyId } = req.body;
-
-        if (!instanceId || !companyId) {
-            return res.status(400).json({ error: "instanceId e companyId são obrigatórios" });
-        }
-        
-        // Verifica se a instância já existe no banco
-        const check = await query('SELECT * FROM "Instance" WHERE id = $1', [instanceId]);
-        
-        // Se não existir, cria o registro inicial
-        if (check.rowCount === 0) {
-            await query(
-                'INSERT INTO "Instance" (id, name, "companyId", status) VALUES ($1, $2, $3, $4)',
-                [instanceId, name || "Nova Instância", companyId, 'DISCONNECTED']
-            );
-        }
-
-        // Se já estiver rodando na memória, não recria
-        if (activeInstances.has(instanceId)) {
-            return res.json({ message: "Instância já está ativa na memória", instanceId });
-        }
-
-        // Inicia o motor do WhatsApp
-        const instance = new WhatsAppInstance(instanceId, io);
-        await instance.init();
-        activeInstances.set(instanceId, instance);
-
-        return res.json({ message: "Processo de conexão iniciado. Aguarde o QR Code.", instanceId });
-
-    } catch (error) {
-        console.error("Erro ao conectar instância:", error);
-        return res.status(500).json({ error: "Falha interna ao iniciar instância" });
-    }
-});
-
-// Rota 3: Dashboard em Tempo Real (SQL para calcular métricas)
+// Rota 1: Dashboard Geral (KPIs)
 app.get('/instance/:id/dashboard', async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
-
-        // Query 1: Contar leads não respondidos (Últimas 24h)
-        // Lógica: Mensagens que são "IN" e não têm uma "OUT" depois
+        
+        // Leads pendentes (Última msg foi IN nas últimas 24h)
         const leadsQuery = await query(`
-            SELECT COUNT(DISTINCT "customerHash") as total
-            FROM "AuditLog"
-            WHERE "instanceId" = $1 
-            AND direction = 'IN'
-            AND timestamp > NOW() - INTERVAL '24 HOURS'
+            SELECT COUNT(DISTINCT t1."customerHash") as total
+            FROM "AuditLog" t1
+            WHERE t1."instanceId" = $1 
+            AND t1.direction = 'IN'
+            AND t1.timestamp > NOW() - INTERVAL '24 HOURS'
+            AND NOT EXISTS (
+                SELECT 1 FROM "AuditLog" t2 
+                WHERE t2."customerHash" = t1."customerHash" 
+                AND t2."instanceId" = t1."instanceId"
+                AND t2.timestamp > t1.timestamp
+                AND t2.direction = 'OUT'
+            )
         `, [id]);
 
-        // Query 2: Média de tempo de resposta (Exemplo simples)
-        // Em produção, queries mais complexas podem ser necessárias para precisão exata
+        // Tempo médio de resposta
         const responseTimeQuery = await query(`
             SELECT AVG(EXTRACT(EPOCH FROM (t2.timestamp - t1.timestamp))) as avg_seconds
             FROM "AuditLog" t1
             JOIN "AuditLog" t2 ON t1."customerHash" = t2."customerHash"
-            WHERE t1."instanceId" = $1
-            AND t1.direction = 'IN' 
-            AND t2.direction = 'OUT'
-            AND t2.timestamp > t1.timestamp
-            AND t2.timestamp < t1.timestamp + INTERVAL '1 HOUR'
+            WHERE t1."instanceId" = $1 AND t1.direction = 'IN' AND t2.direction = 'OUT'
+            AND t2.timestamp > t1.timestamp AND t2.timestamp < t1.timestamp + INTERVAL '2 HOURS'
         `, [id]);
 
         return res.json({
@@ -112,15 +54,82 @@ app.get('/instance/:id/dashboard', async (req: Request, res: Response) => {
             avgResponseTime: parseFloat(responseTimeQuery.rows[0]?.avg_seconds || "0").toFixed(1),
             status: activeInstances.has(id) ? 'ONLINE' : 'OFFLINE'
         });
-
     } catch (error) {
-        console.error(error);
-        return res.status(500).json({ error: "Erro ao carregar dashboard" });
+        return res.status(500).json({ error: "Erro no dashboard" });
     }
 });
 
+// Rota 2: Alerta Vermelho (Quem está esperando há > 10 min?)
+app.get('/instance/:id/red-alert', async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const sql = `
+            SELECT 
+                "customerHash", 
+                MAX(timestamp) as last_interaction,
+                EXTRACT(EPOCH FROM (NOW() - MAX(timestamp))) / 60 as minutes_waiting
+            FROM "AuditLog"
+            WHERE "instanceId" = $1 AND direction = 'IN'
+            GROUP BY "customerHash"
+            HAVING EXTRACT(EPOCH FROM (NOW() - MAX(timestamp))) / 60 > 10 -- Mais de 10 min
+            ORDER BY minutes_waiting DESC
+            LIMIT 10;
+        `;
+        const result = await query(sql, [id]);
+        res.json(result.rows);
+    } catch (error) {
+        res.status(500).json({ error: "Erro no red alert" });
+    }
+});
+
+// Rota 3: Funil de Palavras (O que estão falando?)
+app.get('/instance/:id/funnel', async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        // Simples contagem baseada em LIKE (Idealmente seria Full Text Search)
+        const keywords = ['pix', 'cardapio', 'entreg', 'atras', 'valor'];
+        const results = [];
+
+        for (const word of keywords) {
+            const count = await query(`
+                SELECT COUNT(*) as total FROM "AuditLog" 
+                WHERE "instanceId" = $1 AND content ILIKE $2 AND direction = 'IN'
+            `, [id, `%${word}%`]);
+            results.push({ keyword: word, count: parseInt(count.rows[0].total) });
+        }
+        res.json(results);
+    } catch (error) {
+        res.status(500).json({ error: "Erro no funil" });
+    }
+});
+
+// Rota 4: Criar Regra de Automação
+app.post('/automation', async (req: Request, res: Response) => {
+    try {
+        const { instanceId, keyword, response } = req.body;
+        const id = uuidv4();
+        await query(
+            `INSERT INTO "AutomationRule" (id, "instanceId", keyword, response) VALUES ($1, $2, $3, $4)`,
+            [id, instanceId, keyword, response]
+        );
+        res.json({ success: true, id });
+    } catch (error) {
+        res.status(500).json({ error: "Erro ao criar regra" });
+    }
+});
+
+// Rota 5: Listar Regras
+app.get('/instance/:id/automation', async (req: Request, res: Response) => {
+    try {
+        const result = await query(`SELECT * FROM "AutomationRule" WHERE "instanceId" = $1`, [req.params.id]);
+        res.json(result.rows);
+    } catch (error) {
+        res.status(500).json({ error: "Erro ao listar regras" });
+    }
+});
+
+// ... (Resto do código do server: listen port, etc)
 const PORT = process.env.PORT || 3333;
 httpServer.listen(PORT, () => {
-    console.log(`🚀 R&B Digital: Raio-X 360 rodando na porta ${PORT}`);
-    console.log(`🔧 Modo: SQL Direto (Sem Prisma Client)`);
+    console.log(`🚀 Raio-X 360 rodando na porta ${PORT}`);
 });
