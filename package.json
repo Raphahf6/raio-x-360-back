@@ -4,10 +4,10 @@
   "description": "Sistema de Auditoria Raio-X Operacional 360",
   "main": "src/server.ts",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "prisma:generate": "npx prisma generate",
-    "prisma:migrate": "npx prisma migrate dev"
-  },
+  "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+  "build": "tsc",
+  "start": "node dist/server.js"
+},
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@types/uuid": "^10.0.0",
