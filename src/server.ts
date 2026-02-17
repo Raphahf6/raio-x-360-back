@@ -14,17 +14,75 @@ app.use(cors());
 app.use(express.json());
 
 const httpServer = createServer(app);
-const io = new Server(httpServer, { cors: { origin: "*" } });
+const io = new Server(httpServer, {
+    cors: { origin: "*" } // Permite conexões de qualquer frontend
+});
+
+// Armazena as sessões ativas na memória RAM
 export const activeInstances = new Map<string, WhatsAppInstance>();
 
-// ... (Rotas de Company e Connect iguais ao anterior) ...
+// =======================================================
+//   ROTAS DA API
+// =======================================================
 
-// Rota 1: Dashboard Geral (KPIs)
+// Rota 1: Criar Empresa
+app.post('/company', async (req: Request, res: Response) => {
+    try {
+        const { name } = req.body;
+        if (!name) return res.status(400).json({ error: "Nome obrigatório" });
+        
+        const id = uuidv4();
+        await query('INSERT INTO "Company" (id, name) VALUES ($1, $2)', [id, name]);
+        
+        return res.json({ id, name, message: "Empresa criada com sucesso" });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: "Erro ao criar empresa" });
+    }
+});
+
+// Rota 2: Conectar Instância (Inicia o WhatsApp)
+app.post('/instance/connect', async (req: Request, res: Response) => {
+    try {
+        const { instanceId, name, companyId } = req.body;
+
+        if (!instanceId || !companyId) {
+            return res.status(400).json({ error: "instanceId e companyId obrigatórios" });
+        }
+        
+        // Verifica/Cria registro no banco
+        const check = await query('SELECT * FROM "Instance" WHERE id = $1', [instanceId]);
+        if (check.rowCount === 0) {
+            await query(
+                'INSERT INTO "Instance" (id, name, "companyId", status) VALUES ($1, $2, $3, $4)',
+                [instanceId, name || "Nova Instância", companyId, 'DISCONNECTED']
+            );
+        }
+
+        // Se já estiver na memória, retorna
+        if (activeInstances.has(instanceId)) {
+            return res.json({ message: "Instância já ativa", instanceId });
+        }
+
+        // Inicia o motor
+        const instance = new WhatsAppInstance(instanceId, io);
+        activeInstances.set(instanceId, instance); // Salva na memória antes de iniciar
+        await instance.init();
+
+        return res.json({ message: "Conexão iniciada", instanceId });
+
+    } catch (error) {
+        console.error("Erro ao conectar:", error);
+        return res.status(500).json({ error: "Falha interna" });
+    }
+});
+
+// Rota 3: Dashboard Geral (KPIs)
 app.get('/instance/:id/dashboard', async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
         
-        // Leads pendentes (Última msg foi IN nas últimas 24h)
+        // Leads pendentes (Última msg foi IN nas últimas 24h sem resposta)
         const leadsQuery = await query(`
             SELECT COUNT(DISTINCT t1."customerHash") as total
             FROM "AuditLog" t1
@@ -59,7 +117,7 @@ app.get('/instance/:id/dashboard', async (req: Request, res: Response) => {
     }
 });
 
-// Rota 2: Alerta Vermelho (Quem está esperando há > 10 min?)
+// Rota 4: Alerta Vermelho (> 10 min de espera)
 app.get('/instance/:id/red-alert', async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
@@ -71,25 +129,25 @@ app.get('/instance/:id/red-alert', async (req: Request, res: Response) => {
             FROM "AuditLog"
             WHERE "instanceId" = $1 AND direction = 'IN'
             GROUP BY "customerHash"
-            HAVING EXTRACT(EPOCH FROM (NOW() - MAX(timestamp))) / 60 > 10 -- Mais de 10 min
+            HAVING EXTRACT(EPOCH FROM (NOW() - MAX(timestamp))) / 60 > 10
             ORDER BY minutes_waiting DESC
             LIMIT 10;
         `;
         const result = await query(sql, [id]);
-        res.json(result.rows);
+        return res.json(result.rows);
     } catch (error) {
-        res.status(500).json({ error: "Erro no red alert" });
+        return res.status(500).json({ error: "Erro no red alert" });
     }
 });
 
-// Rota 3: Funil de Palavras (O que estão falando?)
+// Rota 5: Funil de Palavras (CORRIGIDO TYPE ERROR)
 app.get('/instance/:id/funnel', async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
         const keywords = ['pix', 'cardapio', 'entreg', 'atras', 'valor'];
         
-        // AQUI ESTAVA O ERRO: Precisamos dizer que é um array de qualquer coisa ou tipar o objeto
-        const results: { keyword: string; count: number }[] = []; 
+        // Tipagem explícita para evitar erro 'never'
+        const results: { keyword: string; count: number }[] = [];
 
         for (const word of keywords) {
             const count = await query(`
@@ -97,7 +155,6 @@ app.get('/instance/:id/funnel', async (req: Request, res: Response) => {
                 WHERE "instanceId" = $1 AND content ILIKE $2 AND direction = 'IN'
             `, [id, `%${word}%`]);
             
-            // O Postgres retorna count como string, precisamos converter
             results.push({ 
                 keyword: word, 
                 count: parseInt(count.rows[0]?.total || "0") 
@@ -105,19 +162,15 @@ app.get('/instance/:id/funnel', async (req: Request, res: Response) => {
         }
         return res.json(results);
     } catch (error) {
-        console.error(error);
         return res.status(500).json({ error: "Erro no funil" });
     }
 });
 
-// Rota 4: Criar Regra de Automação (Garanta que está assim)
+// Rota 6: Criar Regra de Automação
 app.post('/automation', async (req: Request, res: Response) => {
     try {
         const { instanceId, keyword, response } = req.body;
-        
-        if (!instanceId || !keyword || !response) {
-            return res.status(400).json({ error: "Dados incompletos" });
-        }
+        if (!instanceId || !keyword || !response) return res.status(400).json({ error: "Dados incompletos" });
 
         const id = uuidv4();
         await query(
@@ -126,58 +179,66 @@ app.post('/automation', async (req: Request, res: Response) => {
         );
         return res.json({ success: true, id });
     } catch (error) {
-        console.error(error);
         return res.status(500).json({ error: "Erro ao criar regra" });
     }
 });
 
-// Rota 5: Listar Regras (Garanta que está assim)
+// Rota 7: Listar Regras
 app.get('/instance/:id/automation', async (req: Request, res: Response) => {
     try {
         const result = await query(`SELECT * FROM "AutomationRule" WHERE "instanceId" = $1`, [req.params.id]);
         return res.json(result.rows);
     } catch (error) {
-        console.error(error);
         return res.status(500).json({ error: "Erro ao listar regras" });
     }
 });
 
-// ... (Resto do código do server: listen port, etc)
-const PORT = process.env.PORT || 3333;
-httpServer.listen(PORT, () => {
-    console.log(`🚀 Raio-X 360 rodando na porta ${PORT}`);
-});
-
-// ===> ADICIONE ESTA FUNÇÃO NO FINAL DO ARQUIVO <===
-
+// =======================================================
+//   RESTAURAÇÃO DE SESSÃO (AUTO-RECONNECT)
+// =======================================================
 async function restoreSessions() {
     try {
         console.log("🔄 Buscando sessões para restaurar...");
-        // Busca todas as instâncias que deveriam estar conectadas
+        // Busca apenas quem estava marcado como CONNECTED
         const result = await query('SELECT * FROM "Instance" WHERE status = $1', ['CONNECTED']);
         
+        if (result.rowCount === 0) {
+             console.log("ℹ️ Nenhuma sessão ativa encontrada.");
+             return;
+        }
+
         for (const row of result.rows) {
             const instanceId = row.id;
+            
+            if (activeInstances.has(instanceId)) {
+                continue; // Já está rodando
+            }
+
             console.log(`🔌 Restaurando instância: ${instanceId}`);
             
-            // Recria a classe (Isso vai ler a pasta sessions do Disco Persistente)
+            // Recria a classe. O Baileys lerá a pasta 'sessions' do disco automaticamente.
             const instance = new WhatsAppInstance(instanceId, io);
             activeInstances.set(instanceId, instance);
             
-            // Inicia sem forçar nova conexão (vai usar os arquivos salvos)
+            // Inicia a conexão
             await instance.init();
         }
-        console.log(`✅ ${result.rowCount} sessões restauradas com sucesso.`);
+        console.log(`✅ ${result.rowCount} sessões processadas.`);
     } catch (error) {
         console.error("❌ Erro ao restaurar sessões:", error);
     }
 }
 
+// =======================================================
+//   SERVER START
+// =======================================================
+const PORT = process.env.PORT || 3333;
 
-// Inicia o servidor e DEPOIS restaura as sessões
+// Apenas UM listen no arquivo inteiro
 httpServer.listen(PORT, async () => {
     console.log(`🚀 Raio-X 360 rodando na porta ${PORT}`);
+    console.log(`🔧 Modo: SQL Direto (Sem Prisma Client)`);
     
-    // Chama a restauração automática
+    // Tenta restaurar sessões antigas
     await restoreSessions();
 });
