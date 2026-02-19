@@ -193,6 +193,24 @@ app.get('/instance/:id/automation', async (req: Request, res: Response) => {
     }
 });
 
+// Rota CRM: Listar Clientes
+app.get('/instance/:id/customers', async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        // Pega os clientes ordenados por quem falou por último
+        const result = await query(`
+            SELECT * FROM "Customer" 
+            WHERE "instanceId" = $1 
+            ORDER BY "lastContact" DESC 
+            LIMIT 100
+        `, [id]);
+        
+        return res.json(result.rows);
+    } catch (error) {
+        return res.status(500).json({ error: "Erro ao listar CRM" });
+    }
+});
+
 // =======================================================
 //   RESTAURAÇÃO DE SESSÃO (AUTO-RECONNECT)
 // =======================================================

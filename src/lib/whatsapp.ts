@@ -10,6 +10,7 @@ import crypto from "crypto";
 import { Server } from "socket.io";
 import { v4 as uuidv4 } from 'uuid';
 import { query } from "./db";
+import { AiService } from "../services/AiService"; // Importando nosso novo Cérebro
 
 export class WhatsAppInstance {
     public sock: any;
@@ -34,7 +35,7 @@ export class WhatsAppInstance {
             version,
             auth: state,
             printQRInTerminal: false,
-            browser: ['R&B Digital', 'Chrome', 'Auditoria 360'],
+            browser: ['R&B Delivery AI', 'Chrome', '1.0.0'],
             defaultQueryTimeoutMs: undefined,
         });
 
@@ -65,17 +66,29 @@ export class WhatsAppInstance {
 
                     const customerHash = this.hashNumber(jid);
                     const isFromMe = msg.key.fromMe;
-                    const content = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").toLowerCase();
+                    const content = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
 
-                    // 1. SALVAR LOG (AUDITORIA)
+                    if (!content) continue; // Ignora mensagens vazias ou apenas mídia por enquanto
+
+                    // 1. LÓGICA DE CRM (Cria ou atualiza o cliente)
                     try {
+                        if (!isFromMe) {
+                            await query(`
+                                INSERT INTO "Customer" (id, "instanceId", "phoneHash", "name", "lastContact", "status")
+                                VALUES ($1, $2, $3, $4, NOW(), 'LEAD')
+                                ON CONFLICT ("instanceId", "phoneHash") 
+                                DO UPDATE SET "lastContact" = NOW();
+                            `, [uuidv4(), this.instanceId, customerHash, "Cliente " + customerHash.substring(0,4)]);
+                        }
+
+                        // 2. SALVAR MENSAGEM NO LOG (Para a IA ter histórico)
                         const logId = uuidv4();
                         await query(
                             `INSERT INTO "AuditLog" (id, "instanceId", "customerHash", direction, content, timestamp) VALUES ($1, $2, $3, $4, $5, NOW())`,
                             [logId, this.instanceId, customerHash, isFromMe ? 'OUT' : 'IN', content]
                         );
 
-                        // Emite para o front
+                        // Emite para o front-end atualizar os gráficos
                         this.io.emit(`new_message_${this.instanceId}`, {
                             customerHash,
                             direction: isFromMe ? 'OUT' : 'IN',
@@ -83,9 +96,30 @@ export class WhatsAppInstance {
                             timestamp: new Date()
                         });
 
-                        // 2. AUTOMAÇÃO CIRÚRGICA (Apenas se for mensagem do cliente)
+                        // =======================================================
+                        // 3. O AGENTE DE INTELIGÊNCIA ARTIFICIAL (A Mágica)
+                        // =======================================================
                         if (!isFromMe && content.length > 1) {
-                            await this.handleAutomation(jid, content);
+                            // Simula o "Digitando..." no WhatsApp do cliente
+                            await this.sock.sendPresenceUpdate('composing', jid);
+                            
+                            // Chama a OpenAI passando o ID da instância e o Hash do cliente
+                            const aiResponse = await AiService.generateResponse(this.instanceId, customerHash);
+                            
+                            // Pequeno delay humano antes de enviar a resposta
+                            await delay(1500);
+                            
+                            // Envia a resposta final para o cliente
+                            await this.sock.sendMessage(jid, { text: aiResponse });
+                            
+                            // Simula que parou de digitar
+                            await this.sock.sendPresenceUpdate('paused', jid);
+                            
+                            // Salva a resposta da IA no banco também
+                            await query(
+                                `INSERT INTO "AuditLog" (id, "instanceId", "customerHash", direction, content, timestamp) VALUES ($1, $2, $3, 'OUT', $4, NOW())`,
+                                [uuidv4(), this.instanceId, customerHash, aiResponse]
+                            );
                         }
 
                     } catch (error) {
@@ -94,39 +128,5 @@ export class WhatsAppInstance {
                 }
             }
         });
-    }
-
-    // Lógica da Automação
-    private async handleAutomation(jid: string, content: string) {
-        try {
-            // Busca regras ativas no banco para esta instância
-            const rules = await query(
-                `SELECT * FROM "AutomationRule" WHERE "instanceId" = $1 AND "isActive" = true`,
-                [this.instanceId]
-            );
-
-            for (const rule of rules.rows) {
-                // Verifica se a mensagem contém a palavra-chave (ex: "pix")
-                if (content.includes(rule.keyword.toLowerCase())) {
-                    
-                    console.log(`[Automação] Gatilho acionado: ${rule.keyword}`);
-                    
-                    // Delay humano (2s) para não parecer robô
-                    await delay(2000);
-                    
-                    await this.sock.sendMessage(jid, { text: rule.response });
-                    
-                    // Salva o log da resposta automática também
-                    await query(
-                        `INSERT INTO "AuditLog" (id, "instanceId", "customerHash", direction, content, timestamp) VALUES ($1, $2, $3, 'OUT', $4, NOW())`,
-                        [uuidv4(), this.instanceId, this.hashNumber(jid), `[AUTO] ${rule.response}`]
-                    );
-
-                    break; // Para na primeira regra encontrada (evita spam)
-                }
-            }
-        } catch (error) {
-            console.error("Erro na automação:", error);
-        }
     }
 }
