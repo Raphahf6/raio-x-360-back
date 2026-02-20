@@ -7,6 +7,7 @@ import { CompanyController } from './controllers/CompanyController';
 import { ProductController } from './controllers/ProductController';
 import { WhatsAppController } from './controllers/WhatsAppController';
 import { DashboardController } from './controllers/DashboardController';
+import { CustomerController } from './controllers/CustomerController';
 
 export const routes = Router();
 
@@ -46,3 +47,7 @@ routes.get('/instance/:id/funnel', DashboardController.getFunnel);
 routes.get('/instance/:id/customers', DashboardController.getCustomers);
 routes.post('/automation', DashboardController.createAutomationRule);
 routes.get('/instance/:id/automation', DashboardController.getAutomationRules);
+
+// --- NOVAS ROTAS DE CLIENTE (Adicione aqui) ---
+routes.get('/customer/data', CustomerController.getCustomerData);
+routes.post('/customer/address', CustomerController.saveAddress);
