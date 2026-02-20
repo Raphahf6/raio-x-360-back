@@ -1,5 +1,5 @@
 import { Router } from 'express';
-
+import { AIController } from './controllers/AIController';
 // Importaremos os Controllers no próximo passo
 import { CatalogController } from './controllers/CatalogController';
 import { OrderController } from './controllers/OrderController';
@@ -30,6 +30,7 @@ routes.post('/company', CompanyController.createCompany);
 routes.post('/instance/connect', WhatsAppController.connectInstance);
 routes.get('/company/me', CompanyController.getCompanyByEmail);
 
+
 // ==========================================
 // ROTAS DE CARDÁPIO (PRODUTOS E CATEGORIAS)
 // ==========================================
@@ -38,6 +39,7 @@ routes.get('/instance/:id/categories', ProductController.getCategories);
 routes.post('/instance/:id/product', ProductController.createOrUpdateProduct);
 routes.get('/instance/:id/products', ProductController.getProducts);
 routes.delete('/instance/:id/product/:productId', ProductController.deleteProduct);
+routes.post('/ai/scan-product', AIController.scanProduct);
 
 // ==========================================
 // ROTAS DE DASHBOARD E CRM
