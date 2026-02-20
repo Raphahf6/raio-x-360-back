@@ -1,7 +1,6 @@
 import OpenAI from 'openai';
 import { query } from '../lib/db';
 
-// Inicializa a OpenAI com a chave do seu .env
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
@@ -9,7 +8,7 @@ const openai = new OpenAI({
 export class AiService {
     static async generateResponse(instanceId: string, customerHash: string) {
         try {
-            // 1. BUSCAR O CATÁLOGO DA ADEGA (Apenas produtos disponíveis)
+            // 1. BUSCAR O CATÁLOGO
             const catalogRes = await query(`
                 SELECT p.name, p.description, p.price, c.name as category
                 FROM "Product" p
@@ -27,7 +26,7 @@ export class AiService {
                 });
             }
 
-            // 2. BUSCAR O HISTÓRICO DA CONVERSA (Últimas 10 mensagens para não gastar muitos tokens)
+            // 2. BUSCAR HISTÓRICO
             const historyRes = await query(`
                 SELECT direction, content 
                 FROM "AuditLog"
@@ -36,51 +35,52 @@ export class AiService {
                 LIMIT 10
             `, [instanceId, customerHash]);
 
-            // Como a query traz do mais novo pro mais velho (DESC), precisamos inverter (reverse)
-            // para a OpenAI ler na ordem cronológica correta.
             const chatHistory = historyRes.rows.reverse().map(row => ({
                 role: row.direction === 'IN' ? 'user' : 'assistant',
                 content: row.content
             }));
 
-            // 3. CONSTRUIR O PROMPT DO SISTEMA (A Personalidade do Agente)
+            // 3. PROMPT DE ENGENHARIA AVANÇADA (Anti-Alucinação e Botões)
             const messages: any[] = [
                 {
                     role: "system",
-                    content: `Você é o assistente virtual de vendas de uma adega de bebidas delivery via WhatsApp.
-Seja simpático, rápido e persuasivo. Use linguagem natural de WhatsApp (brasileiro), com emojis de forma moderada.
+                    content: `Você é o assistente virtual de vendas de uma adega delivery via WhatsApp.
+Seja rápido, simpático e persuasivo.
 
-SUA MISSÃO:
-1. Tirar dúvidas sobre o cardápio.
-2. Fazer upsell (se o cliente pedir combo de destilado, ofereça gelo e energético; se pedir cerveja, ofereça amendoim/carvão, desde que tenha no catálogo).
-3. Anotar o pedido completo.
-4. Calcular o total da compra.
-5. Solicitar o endereço de entrega completo.
-6. Solicitar a forma de pagamento (Dinheiro, Cartão na entrega, ou Pix).
+REGRAS DE OURO (NUNCA QUEBRE):
+1. NUNCA invente produtos ou preços. Ofereça EXATAMENTE o que está no catálogo abaixo.
+2. Se for fazer upsell (oferecer adicionais), verifique se o item EXISTE no catálogo antes de falar. NUNCA ofereça amendoim, carvão ou gelo se não estiver na lista.
+3. Se o cliente pedir o cardápio, liste as opções de forma limpa e organizada.
+4. Feche a venda pegando o pedido, o endereço e a forma de pagamento (Pix, Dinheiro ou Cartão na entrega).
 
-REGRAS RÍGIDAS:
-- NUNCA invente produtos ou preços. Use APENAS o catálogo fornecido abaixo.
-- Se o cliente pedir algo que não está no catálogo, diga educadamente que não temos e ofereça uma alternativa similar.
-- Responda de forma concisa. Textões não funcionam bem no WhatsApp.
+${catalogText}
 
-${catalogText}`
+FORMATO DE SAÍDA OBRIGATÓRIO (BOTÕES CLICÁVEIS):
+Você deve SEMPRE terminar sua resposta oferecendo de 1 a 3 opções curtas (máximo 20 caracteres cada) para o cliente clicar.
+Separe o texto da sua resposta e os botões usando exatos três pipes: |||
+Separe os botões entre si usando vírgulas.
+
+EXEMPLO DE RESPOSTA CORRETA:
+O combo Tanqueray custa R$ 169,90. Vai querer adicionar gelo? ||| Sim, Não, Ver outros combos
+
+EXEMPLO DE RESPOSTA CORRETA 2:
+Tudo certo! Qual será a forma de pagamento? ||| Pix, Cartão, Dinheiro`
                 },
-                ...chatHistory // Injeta as mensagens trocadas até agora (incluindo a última que o cliente acabou de mandar)
+                ...chatHistory
             ];
 
-            // 4. CHAMAR A OPENAI (Usando o modelo ultrarrápido e barato)
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
                 messages: messages,
-                temperature: 0.7, // Criatividade controlada (0 a 1)
-                max_tokens: 300,  // Respostas curtas
+                temperature: 0.2, // Temperatura baixa para focar no catálogo e evitar invenções
+                max_tokens: 300,
             });
 
-            return completion.choices[0].message.content || "Desculpe, tive um problema ao processar sua mensagem.";
+            return completion.choices[0].message.content || "Desculpe, tive um erro de processamento. ||| Falar com atendente";
 
         } catch (error) {
             console.error("Erro no AiService:", error);
-            return "Poxa, nosso sistema de atendimento está passando por uma pequena instabilidade. Aguarde um minutinho e mande a mensagem de novo, por favor!";
+            return "Poxa, nosso sistema está com uma instabilidade. Aguarde um momento. ||| Tentar novamente";
         }
     }
 }

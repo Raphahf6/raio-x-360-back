@@ -6,11 +6,12 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import path from "path";
+import fs from "fs"; // Importação nativa do Node para manipular arquivos
 import crypto from "crypto";
 import { Server } from "socket.io";
 import { v4 as uuidv4 } from 'uuid';
 import { query } from "./db";
-import { AiService } from "../services/AiService"; // Importando nosso novo Cérebro
+import { AiService } from "../services/AiService";
 
 export class WhatsAppInstance {
     public sock: any;
@@ -24,6 +25,24 @@ export class WhatsAppInstance {
 
     private hashNumber(jid: string) {
         return crypto.createHash('sha256').update(jid).digest('hex');
+    }
+
+    // Função interna para formatar e enviar botões
+    private async sendButtonMessage(jid: string, text: string, buttonLabels: string[]) {
+        const buttons = buttonLabels.slice(0, 3).map((btn, index) => ({
+            buttonId: `btn_${index}`,
+            buttonText: { displayText: btn.trim().substring(0, 20) }, 
+            type: 1
+        }));
+
+        const buttonMessage = {
+            text: text,
+            footer: 'Selecione uma opção 👇',
+            buttons: buttons,
+            headerType: 1
+        };
+
+        await this.sock.sendMessage(jid, buttonMessage);
     }
 
     public async init() {
@@ -45,16 +64,38 @@ export class WhatsAppInstance {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
+                // Emite o QR Code para o front-end
                 this.io.emit(`qr_${this.instanceId}`, qr);
             }
 
             if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+                const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+                
+                // Verifica se foi deslogado pelo celular (401 device_removed ou loggedOut)
+                const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+
                 await query('UPDATE "Instance" SET status = $1 WHERE id = $2', ['DISCONNECTED', this.instanceId]);
-                if (shouldReconnect) this.init();
+                this.io.emit(`status_${this.instanceId}`, 'DISCONNECTED');
+
+                if (isLoggedOut) {
+                    console.log(`⚠️ Dispositivo deslogado pelo usuário. Limpando sessão ${this.instanceId}...`);
+                    
+                    // Apaga a pasta de credenciais que foi invalidada
+                    if (fs.existsSync(authPath)) {
+                        fs.rmSync(authPath, { recursive: true, force: true });
+                    }
+                    
+                    // Inicia a instância do zero. Como a pasta não existe mais, ele vai gerar um NOVO QR Code
+                    this.init();
+                } else {
+                    // Queda de internet ou reinício do servidor, apenas tenta reconectar com os mesmos arquivos
+                    console.log(`🔄 Tentando reconectar instância ${this.instanceId}...`);
+                    this.init();
+                }
             } else if (connection === 'open') {
                 await query('UPDATE "Instance" SET status = $1 WHERE id = $2', ['CONNECTED', this.instanceId]);
                 this.io.emit(`status_${this.instanceId}`, 'CONNECTED');
+                console.log(`✅ Instância ${this.instanceId} conectada com sucesso!`);
             }
         });
 
@@ -66,13 +107,23 @@ export class WhatsAppInstance {
 
                     const customerHash = this.hashNumber(jid);
                     const isFromMe = msg.key.fromMe;
-                    const content = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
+                    
+                    const content = (
+                        msg.message?.conversation || 
+                        msg.message?.extendedTextMessage?.text || 
+                        msg.message?.buttonsResponseMessage?.selectedDisplayText || 
+                        ""
+                    ).trim();
 
-                    if (!content) continue; // Ignora mensagens vazias ou apenas mídia por enquanto
+                    if (!content) continue;
 
-                    // 1. LÓGICA DE CRM (Cria ou atualiza o cliente)
                     try {
+                        let isFirstContact = false;
+
                         if (!isFromMe) {
+                            const checkCustomer = await query(`SELECT "id" FROM "Customer" WHERE "instanceId" = $1 AND "phoneHash" = $2`, [this.instanceId, customerHash]);
+                            isFirstContact = checkCustomer.rowCount === 0;
+
                             await query(`
                                 INSERT INTO "Customer" (id, "instanceId", "phoneHash", "name", "lastContact", "status")
                                 VALUES ($1, $2, $3, $4, NOW(), 'LEAD')
@@ -81,14 +132,12 @@ export class WhatsAppInstance {
                             `, [uuidv4(), this.instanceId, customerHash, "Cliente " + customerHash.substring(0,4)]);
                         }
 
-                        // 2. SALVAR MENSAGEM NO LOG (Para a IA ter histórico)
                         const logId = uuidv4();
                         await query(
                             `INSERT INTO "AuditLog" (id, "instanceId", "customerHash", direction, content, timestamp) VALUES ($1, $2, $3, $4, $5, NOW())`,
                             [logId, this.instanceId, customerHash, isFromMe ? 'OUT' : 'IN', content]
                         );
 
-                        // Emite para o front-end atualizar os gráficos
                         this.io.emit(`new_message_${this.instanceId}`, {
                             customerHash,
                             direction: isFromMe ? 'OUT' : 'IN',
@@ -96,29 +145,35 @@ export class WhatsAppInstance {
                             timestamp: new Date()
                         });
 
-                        // =======================================================
-                        // 3. O AGENTE DE INTELIGÊNCIA ARTIFICIAL (A Mágica)
-                        // =======================================================
-                        if (!isFromMe && content.length > 1) {
-                            // Simula o "Digitando..." no WhatsApp do cliente
+                        if (!isFromMe && content.length > 0) {
                             await this.sock.sendPresenceUpdate('composing', jid);
-                            
-                            // Chama a OpenAI passando o ID da instância e o Hash do cliente
-                            const aiResponse = await AiService.generateResponse(this.instanceId, customerHash);
-                            
-                            // Pequeno delay humano antes de enviar a resposta
-                            await delay(1500);
-                            
-                            // Envia a resposta final para o cliente
-                            await this.sock.sendMessage(jid, { text: aiResponse });
-                            
-                            // Simula que parou de digitar
+                            await delay(1500); 
+
+                            let finalResponseText = "";
+
+                            if (isFirstContact) {
+                                finalResponseText = "Olá! 👋 Bem-vindo ao nosso Delivery rápido. O que você gostaria de pedir hoje?";
+                                await this.sendButtonMessage(jid, finalResponseText, ["Ver Catálogo", "Falar com Humano"]);
+                            } 
+                            else {
+                                const aiRawResponse = await AiService.generateResponse(this.instanceId, customerHash);
+                                
+                                const parts = aiRawResponse.split('|||');
+                                finalResponseText = parts[0].trim();
+                                const buttonsPart = parts[1] ? parts[1].split(',').filter(b => b.trim() !== '') : [];
+
+                                if (buttonsPart.length > 0) {
+                                    await this.sendButtonMessage(jid, finalResponseText, buttonsPart);
+                                } else {
+                                    await this.sock.sendMessage(jid, { text: finalResponseText });
+                                }
+                            }
+
                             await this.sock.sendPresenceUpdate('paused', jid);
                             
-                            // Salva a resposta da IA no banco também
                             await query(
                                 `INSERT INTO "AuditLog" (id, "instanceId", "customerHash", direction, content, timestamp) VALUES ($1, $2, $3, 'OUT', $4, NOW())`,
-                                [uuidv4(), this.instanceId, customerHash, aiResponse]
+                                [uuidv4(), this.instanceId, customerHash, finalResponseText]
                             );
                         }
 
