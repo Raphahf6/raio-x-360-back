@@ -2,9 +2,7 @@ import makeWASocket, {
     useMultiFileAuthState, 
     DisconnectReason, 
     fetchLatestBaileysVersion,
-    delay,
-    generateWAMessageFromContent,
-    proto
+    delay
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import path from "path";
@@ -25,7 +23,7 @@ export class WhatsAppInstance {
     private instanceId: string;
     private io: Server;
     
-    // NOVA FILA DE MENSAGENS (DEBOUNCE)
+    // FILA DE MENSAGENS (DEBOUNCE 5s)
     private messageQueues = new Map<string, { timer: NodeJS.Timeout, texts: string[], jid: string }>();
 
     constructor(instanceId: string, io: Server) {
@@ -35,43 +33,6 @@ export class WhatsAppInstance {
 
     private hashNumber(jid: string) {
         return crypto.createHash('sha256').update(jid).digest('hex');
-    }
-
-    // NOVA FUNÇÃO: Botões Nativos (InteractiveMessage - Padrão Ouro Atual)
-    private async sendInteractiveButtons(jid: string, text: string, buttonLabels: string[]) {
-        if (!buttonLabels || buttonLabels.length === 0 || buttonLabels[0] === '') {
-            await this.sock.sendMessage(jid, { text });
-            return;
-        }
-
-        const dynamicButtons = buttonLabels.slice(0, 3).map((btn, index) => ({
-            name: 'quick_reply',
-            buttonParamsJson: JSON.stringify({
-                display_text: btn.trim().substring(0, 20),
-                id: `btn_${index}`
-            })
-        }));
-
-        const msg = generateWAMessageFromContent(jid, {
-            viewOnceMessage: {
-                message: {
-                    messageContextInfo: {
-                        deviceListMetadata: {},
-                        deviceListMetadataVersion: 2
-                    },
-                    interactiveMessage: proto.Message.InteractiveMessage.create({
-                        body: proto.Message.InteractiveMessage.Body.create({ text: text }),
-                        footer: proto.Message.InteractiveMessage.Footer.create({ text: "Selecione uma opção 👇" }),
-                        header: proto.Message.InteractiveMessage.Header.create({ title: "", subtitle: "", hasMediaAttachment: false }),
-                        nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                            buttons: dynamicButtons
-                        })
-                    })
-                }
-            }
-        }, { userJid: this.sock.user?.id });
-
-        await this.sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
     }
 
     public async init() {
@@ -123,21 +84,10 @@ export class WhatsAppInstance {
                     const customerHash = this.hashNumber(jid);
                     const isFromMe = msg.key.fromMe;
                     
-                    // Lógica robusta para extrair o texto
+                    // Extração de texto simplificada (Sem botões nativos)
                     let content = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-                    
-                    if (msg.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
-                        try {
-                            const params = JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
-                            content = params.display_text || params.id || "";
-                        } catch (e) { content = ""; }
-                    } else if (msg.message?.buttonsResponseMessage?.selectedDisplayText) {
-                        content = msg.message.buttonsResponseMessage.selectedDisplayText;
-                    } else if (msg.message?.templateButtonReplyMessage?.selectedDisplayText) {
-                        content = msg.message.templateButtonReplyMessage.selectedDisplayText;
-                    }
-                    
                     content = content.trim();
+                    
                     if (!content) continue;
 
                     // Se a mensagem foi enviada por nós mesmos (ex: pelo WhatsApp Web), 
@@ -163,15 +113,12 @@ export class WhatsAppInstance {
                     const queueKey = `${this.instanceId}:${customerHash}`;
                     
                     if (this.messageQueues.has(queueKey)) {
-                        // O cliente mandou outra mensagem antes dos 5 segundos acabarem!
                         const q = this.messageQueues.get(queueKey)!;
-                        clearTimeout(q.timer); // Cancela a regressiva antiga
-                        q.texts.push(content); // Junta a nova frase na lista
+                        clearTimeout(q.timer); 
+                        q.texts.push(content); 
                         
-                        // Começa a contar os 5 segundos de novo
                         q.timer = setTimeout(() => this.processGroupedMessage(queueKey), 5000); 
                     } else {
-                        // Primeira mensagem do cliente: cria a fila e começa a contar
                         const timer = setTimeout(() => this.processGroupedMessage(queueKey), 5000);
                         this.messageQueues.set(queueKey, { timer, texts: [content], jid });
                     }
@@ -187,13 +134,11 @@ export class WhatsAppInstance {
         const q = this.messageQueues.get(queueKey);
         if (!q) return;
         
-        // Limpa a fila da memória para a próxima vez
         this.messageQueues.delete(queueKey); 
 
         const { texts, jid } = q;
         const customerHash = queueKey.split(':')[1];
         
-        // Junta todas as frases com quebras de linha
         const combinedContent = texts.join('\n'); 
 
         try {
@@ -224,7 +169,6 @@ export class WhatsAppInstance {
                 console.log(`[SISTEMA] Palavra-chave detectada no bloco de mensagens. Resetando fluxo.`);
             }
 
-            // Destrava cliente que estava preso no humano se o fluxo resetou
             if (shouldReset && customerStatus !== 'LEAD') {
                 customerStatus = 'LEAD';
                 await query(`UPDATE "Customer" SET status = 'LEAD' WHERE "instanceId" = $1 AND "phoneHash" = $2`, [this.instanceId, customerHash]);
@@ -238,7 +182,6 @@ export class WhatsAppInstance {
                 DO UPDATE SET "lastContact" = NOW();
             `, [uuidv4(), this.instanceId, customerHash, "Cliente " + customerHash.substring(0,4)]);
 
-            // Salva O BLOCO TODO como uma única mensagem para economizar banco e tela do CRM
             const logId = uuidv4();
             await query(
                 `INSERT INTO "AuditLog" (id, "instanceId", "customerHash", direction, content, timestamp) VALUES ($1, $2, $3, 'IN', $4, NOW())`,
@@ -256,17 +199,16 @@ export class WhatsAppInstance {
                     await this.sock.sendMessage(jid, { text: "⏳ Certo! Já chamei um de nossos atendentes. Ele já vai te responder por aqui!" });
                     await query(`UPDATE "Customer" SET status = 'HUMAN' WHERE "instanceId" = $1 AND "phoneHash" = $2`, [this.instanceId, customerHash]);
                 }
-                return; // Encerra aqui, pois o humano assumiu
+                return; 
             }
 
-            // Simulador de "digitando..."
             await this.sock.sendPresenceUpdate('composing', jid);
-            await delay(1000); 
+            await delay(1500); // Aumentei levemente o delay para dar tempo de processamento seguro
 
             let finalResponseText = "";
             let finalButtons: string[] = [];
 
-            // 4. Fluxo de Menu (Contato Inicial ou Reset Forçado)
+            // 4. Fluxo de Menu
             if (isFirstContact || shouldReset) {
                 const catalogRes = await query(`
                     SELECT p.name, p.price, c.name as category 
@@ -287,14 +229,13 @@ export class WhatsAppInstance {
                     menuText += `▪️ ${item.name} - R$ ${item.price}\n`;
                 });
 
-                menuText += `\n🛒 *O que você gostaria de pedir hoje?* (Pode digitar ou clicar nos botões abaixo)`;
+                menuText += `\n🛒 *O que você gostaria de pedir hoje?*`;
                 
                 finalResponseText = menuText;
-                finalButtons = ["Fazer Pedido", "Falar com Humano"];
+                finalButtons = ["Fazer Pedido", "Falar com Atendente"];
             } 
             // 5. Fluxo da IA
             else {
-                // A IA agora vai ler as mensagens limpas e agrupadas
                 const aiRawResponse = await AiService.generateResponse(this.instanceId, customerHash);
                 
                 let processedText = aiRawResponse;
@@ -316,13 +257,26 @@ export class WhatsAppInstance {
                 }
             }
 
-            // 6. Envio Final
-            await this.sendInteractiveButtons(jid, finalResponseText, finalButtons);
+            // ============================================================
+            // 6. FORMATAÇÃO SEGURA (TEXTO PURO EM VEZ DE BOTÕES NATIVOS)
+            // ============================================================
+            let textToSend = finalResponseText;
+            
+            // Se a IA gerou botões, nós convertemos em um menu de texto
+            if (finalButtons && finalButtons.length > 0) {
+                textToSend += "\n\n*Responda com uma das opções:*";
+                finalButtons.forEach(btn => {
+                    textToSend += `\n👉 ${btn.trim()}`;
+                });
+            }
+
+            // Envio garantido via texto simples
+            await this.sock.sendMessage(jid, { text: textToSend });
             await this.sock.sendPresenceUpdate('paused', jid);
             
             await query(
                 `INSERT INTO "AuditLog" (id, "instanceId", "customerHash", direction, content, timestamp) VALUES ($1, $2, $3, 'OUT', $4, NOW())`,
-                [uuidv4(), this.instanceId, customerHash, finalResponseText]
+                [uuidv4(), this.instanceId, customerHash, textToSend]
             );
 
         } catch (error) {

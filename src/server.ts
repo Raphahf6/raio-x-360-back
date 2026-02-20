@@ -183,6 +183,112 @@ app.post('/automation', async (req: Request, res: Response) => {
     }
 });
 
+// =======================================================
+//   ROTAS DE GERENCIAMENTO DE CARDÁPIO (PRODUTOS E CATEGORIAS)
+// =======================================================
+
+// Rota 1: Criar Categoria (Ex: "Cervejas", "Destilados", "Combos")
+app.post('/instance/:id/category', async (req: Request, res: Response) => {
+    try {
+        const instanceId = req.params.id;
+        const { name } = req.body;
+        
+        if (!name) return res.status(400).json({ error: "O nome da categoria é obrigatório" });
+
+        const id = uuidv4();
+        await query(
+            `INSERT INTO "Category" (id, "instanceId", name) VALUES ($1, $2, $3) RETURNING *`,
+            [id, instanceId, name]
+        );
+
+        return res.json({ success: true, message: "Categoria criada com sucesso!", id, name });
+    } catch (error) {
+        console.error("Erro ao criar categoria:", error);
+        return res.status(500).json({ error: "Erro interno ao criar categoria" });
+    }
+});
+
+// Rota 2: Listar Categorias
+app.get('/instance/:id/categories', async (req: Request, res: Response) => {
+    try {
+        const instanceId = req.params.id;
+        const result = await query(`SELECT * FROM "Category" WHERE "instanceId" = $1 ORDER BY name ASC`, [instanceId]);
+        
+        return res.json(result.rows);
+    } catch (error) {
+        console.error("Erro ao listar categorias:", error);
+        return res.status(500).json({ error: "Erro ao buscar categorias" });
+    }
+});
+
+// Rota 3: Criar ou Atualizar Produto
+app.post('/instance/:id/product', async (req: Request, res: Response) => {
+    try {
+        const instanceId = req.params.id;
+        const { id, name, description, price, categoryId, isAvailable } = req.body;
+
+        if (!name || price === undefined) {
+            return res.status(400).json({ error: "Nome e preço são obrigatórios" });
+        }
+
+        if (id) {
+            // Se enviou ID, é uma ATUALIZAÇÃO
+            await query(`
+                UPDATE "Product" 
+                SET name = $1, description = $2, price = $3, "categoryId" = $4, "isAvailable" = $5
+                WHERE id = $6 AND "instanceId" = $7
+            `, [name, description, price, categoryId || null, isAvailable !== false, id, instanceId]);
+            
+            return res.json({ success: true, message: "Produto atualizado com sucesso!" });
+        } else {
+            // Se não enviou ID, é uma CRIAÇÃO
+            const newId = uuidv4();
+            await query(`
+                INSERT INTO "Product" (id, "instanceId", name, description, price, "categoryId", "isAvailable") 
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `, [newId, instanceId, name, description, price, categoryId || null, isAvailable !== false]);
+            
+            return res.json({ success: true, message: "Produto criado com sucesso!", id: newId });
+        }
+    } catch (error) {
+        console.error("Erro ao salvar produto:", error);
+        return res.status(500).json({ error: "Erro interno ao salvar produto" });
+    }
+});
+
+// Rota 4: Listar Produtos (Para exibir na tabela do Painel)
+app.get('/instance/:id/products', async (req: Request, res: Response) => {
+    try {
+        const instanceId = req.params.id;
+        
+        // Traz os produtos junto com o nome da categoria
+        const result = await query(`
+            SELECT p.*, c.name as category_name 
+            FROM "Product" p
+            LEFT JOIN "Category" c ON p."categoryId" = c.id
+            WHERE p."instanceId" = $1
+            ORDER BY c.name ASC, p.name ASC
+        `, [instanceId]);
+
+        return res.json(result.rows);
+    } catch (error) {
+        console.error("Erro ao listar produtos:", error);
+        return res.status(500).json({ error: "Erro ao buscar produtos" });
+    }
+});
+
+// Rota 5: Deletar Produto
+app.delete('/instance/:id/product/:productId', async (req: Request, res: Response) => {
+    try {
+        const { id, productId } = req.params;
+        await query(`DELETE FROM "Product" WHERE id = $1 AND "instanceId" = $2`, [productId, id]);
+        return res.json({ success: true, message: "Produto removido com sucesso!" });
+    } catch (error) {
+        console.error("Erro ao deletar produto:", error);
+        return res.status(500).json({ error: "Erro ao deletar produto" });
+    }
+});
+
 // Rota 7: Listar Regras
 app.get('/instance/:id/automation', async (req: Request, res: Response) => {
     try {
