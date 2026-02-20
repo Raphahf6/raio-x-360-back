@@ -4,17 +4,34 @@ import { query } from '../lib/db';
 
 export class ProductController {
     static async createCategory(req: Request, res: Response) {
-        try {
-            const { name } = req.body;
-            if (!name) return res.status(400).json({ error: "O nome da categoria é obrigatório" });
+    try {
+        const { name } = req.body;
+        const instanceId = req.params.id;
 
-            const id = uuidv4();
-            await query(`INSERT INTO "Category" (id, "instanceId", name) VALUES ($1, $2, $3) RETURNING *`, [id, req.params.id, name]);
-            return res.json({ success: true, message: "Categoria criada com sucesso!", id, name });
-        } catch (error) {
-            return res.status(500).json({ error: "Erro interno ao criar categoria" });
+        if (!name) return res.status(400).json({ error: "O nome é obrigatório" });
+
+        const id = uuidv4();
+        
+        // Use aspas duplas em tudo para garantir o case-sensitivity do Postgres
+        await query(
+            `INSERT INTO "Category" ("id", "instanceId", "name") VALUES ($1, $2, $3)`, 
+            [id, instanceId, name]
+        );
+
+        return res.json({ success: true, id, name });
+    } catch (error: any) {
+        console.error("ERRO NO POSTGRES:", error.message);
+        
+        // Se ainda der erro de FK, você saberá exatamente por aqui
+        if (error.code === '23503') {
+            return res.status(400).json({ 
+                error: "Violação de integridade: O instanceId enviado não existe na tabela de Instâncias." 
+            });
         }
+
+        return res.status(500).json({ error: "Erro interno: " + error.message });
     }
+}
 
     static async getCategories(req: Request, res: Response) {
         try {
