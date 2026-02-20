@@ -26,11 +26,13 @@ export class AiService {
                 });
             }
 
-            // 2. BUSCAR HISTÓRICO
+            // 2. BUSCAR HISTÓRICO (AGORA COM LIMITE DE 1 HORA)
             const historyRes = await query(`
                 SELECT direction, content 
                 FROM "AuditLog"
-                WHERE "instanceId" = $1 AND "customerHash" = $2
+                WHERE "instanceId" = $1 
+                AND "customerHash" = $2
+                AND timestamp >= NOW() - INTERVAL '1 HOUR'
                 ORDER BY timestamp DESC
                 LIMIT 12
             `, [instanceId, customerHash]);
