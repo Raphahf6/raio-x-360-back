@@ -28,6 +28,7 @@ routes.patch('/instance/:id/order/:orderId/status', OrderController.updateOrderS
 // ==========================================
 routes.post('/company', CompanyController.createCompany);
 routes.post('/instance/connect', WhatsAppController.connectInstance);
+routes.get('/company/me', CompanyController.getCompanyByEmail);
 
 // ==========================================
 // ROTAS DE CARDÁPIO (PRODUTOS E CATEGORIAS)
